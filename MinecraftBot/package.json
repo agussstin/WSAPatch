@@ -1,0 +1,20 @@
+{
+  "name": "minecraft-survival-bot",
+  "version": "0.1.0",
+  "description": "Bot de Minecraft Java basado en reglas (sin modelos de lenguaje): sobrevive, fabrica y explora.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/planner.test.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "mineflayer": "^4.39.0",
+    "mineflayer-collectblock": "^1.6.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "vec3": "^0.2.0"
+  }
+}
