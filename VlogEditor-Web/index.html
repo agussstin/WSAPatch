@@ -54,6 +54,10 @@
     </div>
     <div id="bar" hidden><div id="barFill"></div></div>
     <p id="exportNote" class="mut" hidden>Exportando en tiempo real: deja esta pestaña visible hasta que termine.</p>
+    <div id="result" hidden>
+      <p class="mut">Vlog exportado. Si no se descargó solo, clic derecho sobre el video y "Guardar video como…".</p>
+      <video id="resultVid" controls style="max-width:100%;max-height:50vh"></video>
+    </div>
   </section>
 
   <section>
@@ -386,8 +390,10 @@ $('exportBtn').onclick = async () => {
   if (!ok) return;
   const blob = new Blob(chunks, { type: mime.split(';')[0] });
   if (!blob.size) return toast('La exportación salió vacía. Intenta de nuevo.');
+  const blobUrl = URL.createObjectURL(blob);
+  $('resultVid').src = blobUrl; $('result').hidden = false;
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
+  a.href = blobUrl;
   a.download = 'vlog.' + (mime.startsWith('video/mp4') ? 'mp4' : 'webm');
   a.click();
   toast('¡Listo! Se descargó tu vlog.');
