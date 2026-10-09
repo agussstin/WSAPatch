@@ -61,6 +61,9 @@
   #barFill { height:100%; width:0; background:var(--acc); }
   #result { margin-top:12px; }
   #result video { max-width:100%; max-height:50vh; border-radius:8px; }
+  .short { margin-top:10px; }
+  .short video { width:100%; max-height:260px; border-radius:8px; background:#000; }
+  .short .row { margin-top:4px; }
   #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:#000d; border:1px solid var(--line); padding:10px 16px; border-radius:10px; max-width:90vw; display:none; z-index:9; }
   #busy { position:fixed; inset:0; background:#000a; display:none; align-items:center; justify-content:center; z-index:8; }
   #busy div { background:var(--card); padding:20px 28px; border-radius:12px; border:1px solid var(--line); }
@@ -130,6 +133,18 @@
       </label>
       <p class="mut">Se repite en bucle y baja con fade-out al final.</p>
     </div>
+    <div class="panel" style="margin-top:12px">
+      <h2>Shorts automáticos</h2>
+      <div class="row">
+        <label class="fld grow"><span class="lab">Cantidad</span><input type="number" id="shN" min="1" max="20" value="5"></label>
+        <label class="fld grow"><span class="lab">Duración</span>
+          <select id="shD"><option value="15">15 s</option><option value="30" selected>30 s</option><option value="45">45 s</option><option value="60">60 s</option></select></label>
+      </div>
+      <button id="shGo" class="primary" style="width:100%" disabled>✨ Generar shorts</button>
+      <p class="mut">Busca los tramos con más voz o sonido, los recorta a 9:16 centrado y los graba uno por uno. Tarda lo mismo que la duración total de los shorts. Los textos no se incluyen.</p>
+      <div id="shProg" class="mut"></div>
+      <div id="shList"></div>
+    </div>
     <div class="panel hint" style="margin-top:12px">
       <h2>Atajos</h2>
       <p><kbd>Espacio</kbd> reproducir / pausar</p>
@@ -156,7 +171,8 @@ const FILTER_NAMES = { none: 'Original', warm: 'Cálido', cool: 'Frío', bw: 'Bl
 const SPEEDS = [0.5, 0.75, 1, 1.5, 2];
 const FADE = 0.4, MIN = 0.2;
 
-const S = { clips: [], texts: [], music: null, aspect: 'vertical', sel: null, pps: 60, playing: false, exporting: false, playhead: 0 };
+const S = { clips: [], texts: [], music: null, aspect: 'vertical', sel: null, pps: 60, playing: false, exporting: false, cover: false, playhead: 0 };
+let shortsList = [];
 const hist = { undo: [], redo: [] };
 let uid = 0, loadedUrl = null, token = 0, raf = 0, drag = null;
 let audioCtx, clipGain, musicGain, speakerGain, recDest, musicEl;
@@ -226,7 +242,8 @@ function drawComposite(T) {
   const e = entryAt(T, items);
   if (e && loadedUrl === e.c.url && vid.videoWidth) {
     ctx.filter = FILTERS[e.c.filter] || 'none';
-    const s = Math.min(W / vid.videoWidth, H / vid.videoHeight), w = vid.videoWidth * s, h = vid.videoHeight * s;
+    const k = S.cover ? Math.max : Math.min;   // shorts: llenar el cuadro y recortar; resto: encajar
+    const s = k(W / vid.videoWidth, H / vid.videoHeight), w = vid.videoWidth * s, h = vid.videoHeight * s;
     ctx.drawImage(vid, (W - w) / 2, (H - h) / 2, w, h);
     ctx.filter = 'none';
     if (e.c.fade) {
@@ -514,13 +531,12 @@ function pickMime() {
   return ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
     .find(m => MediaRecorder.isTypeSupported(m));
 }
-async function exportVlog() {
-  if (S.exporting || !S.clips.length) return;
+// Graba el timeline actual en tiempo real. Devuelve { blob, ext } o null.
+async function recordTimeline(onProgress) {
   const mime = pickMime();
-  if (!mime) return toast('Tu navegador no puede exportar video. Usa Chrome o Edge.');
+  if (!mime) { toast('Tu navegador no puede exportar video. Usa Chrome o Edge.'); return null; }
   stop(); ensureAudio(); await audioCtx.resume();
-  S.exporting = true; speakerGain.gain.value = 0; updateToolbar();
-  $('bar').hidden = false; $('exportNote').hidden = false; $('result').hidden = true;
+  speakerGain.gain.value = 0;
   const { total } = layout();
   const stream = new MediaStream([...cv.captureStream(30).getVideoTracks(), ...recDest.stream.getAudioTracks()]);
   const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8e6 });
@@ -531,42 +547,137 @@ async function exportVlog() {
   try {
     if (S.music) { musicEl.currentTime = 0; musicEl.play().catch(() => {}); }
     rec.start(1000);
-    ok = await runSeq(0, my, T => { $('barFill').style.width = Math.min(100, T / total * 100) + '%'; });
+    ok = await runSeq(0, my, T => onProgress(T / total));
     await sleep(300);
   } catch (err) { toast(err.message); }
   vid.pause(); if (musicEl) musicEl.pause();
   rec.stop(); await stopped;
-
-  S.exporting = false; speakerGain.gain.value = 1;
+  speakerGain.gain.value = 1;
+  if (!ok) return null;
+  const blob = new Blob(chunks, { type: mime.split(';')[0] });
+  if (!blob.size) { toast('La grabación salió vacía. Intenta de nuevo.'); return null; }
+  return { blob, ext: mime.startsWith('video/mp4') ? 'mp4' : 'webm' };
+}
+async function exportVlog() {
+  if (S.exporting || !S.clips.length) return;
+  S.exporting = true; updateToolbar();
+  $('bar').hidden = false; $('exportNote').hidden = false; $('result').hidden = true;
+  const rec = await recordTimeline(p => { $('barFill').style.width = Math.min(100, p * 100) + '%'; });
+  S.exporting = false;
   $('bar').hidden = true; $('exportNote').hidden = true; $('barFill').style.width = '0';
   setPlayhead(0); scrubTo(0); updateToolbar();
-  if (!ok) return toast('La exportación se canceló o falló.');
-  const blob = new Blob(chunks, { type: mime.split(';')[0] });
-  if (!blob.size) return toast('La exportación salió vacía. Intenta de nuevo.');
-  const ext = mime.startsWith('video/mp4') ? 'mp4' : 'webm';
-  $('resultVid').src = URL.createObjectURL(blob);
+  if (!rec) return;
+  $('resultVid').src = URL.createObjectURL(rec.blob);
   $('result').hidden = false;
-  await offerDownload(blob, `vlog.${ext}`);
+  $('resultNote').textContent = await saveBlob(rec.blob, `vlog.${rec.ext}`);
 }
 $('exportBtn').onclick = exportVlog;
 
 // Con la capacidad `downloads` (página publicada) se pide permiso al viewer; si no existe, enlace directo.
-async function offerDownload(blob, filename) {
-  try {
-    const dl = window.claude?.use ? await window.claude.use('downloads') : null;
-    if (dl) {
-      await dl.save({ filename, data: blob });
-      $('resultNote').textContent = 'Vlog guardado.';
-      return;
-    }
-  } catch (err) {
-    if (err?.code === 'declined') { $('resultNote').textContent = 'Descarga cancelada. Puedes guardarlo desde el reproductor.'; return; }
+async function saveBlob(blob, filename) {
+  const dl = window.claude?.use ? await window.claude.use('downloads').catch(() => null) : null;
+  if (dl) {
+    try { await dl.save({ filename, data: blob }); return 'Guardado.'; }
+    catch (err) { return err?.code === 'declined' ? 'Descarga cancelada.' : `No se pudo guardar (${err?.code || 'error'}).`; }
   }
   const a = document.createElement('a');
-  a.href = $('resultVid').src; a.download = filename;
+  a.href = URL.createObjectURL(blob); a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
-  $('resultNote').textContent = 'Si no se descargó solo, clic derecho sobre el video y "Guardar video como…".';
+  return 'Si no se descargó solo, usa "Guardar video como…" en el reproductor.';
 }
+
+/* ---------- shorts automáticos ---------- */
+const energyCache = new Map();   // url -> { hop (s), db[] } con la energía cada medio segundo
+async function energyOf(clip) {
+  if (energyCache.has(clip.url)) return energyCache.get(clip.url);
+  ensureAudio();
+  let res = null;
+  try {
+    const buf = await audioCtx.decodeAudioData(await clip.file.arrayBuffer());
+    const data = buf.getChannelData(0), hop = Math.floor(buf.sampleRate * 0.5), db = [];
+    for (let p = 0; p < data.length; p += hop) {
+      const e = Math.min(p + hop, data.length); let s = 0;
+      for (let k = p; k < e; k++) s += data[k] * data[k];
+      db.push(20 * Math.log10(Math.max(Math.sqrt(s / (e - p)), 1e-7)));
+    }
+    res = { hop: hop / buf.sampleRate, db };
+  } catch (err) { res = null; }     // sin audio o formato no decodificable
+  energyCache.set(clip.url, res);
+  return res;
+}
+// Puntúa ventanas de D segundos del timeline por energía (voz y música) y elige las mejores sin solaparse.
+async function findHighlights(n, D) {
+  const cands = [];
+  for (const clip of S.clips) {
+    const en = await energyOf(clip); if (!en) continue;
+    const win = Math.max(1, Math.round(D * clip.speed / en.hop));
+    const i0 = Math.ceil(clip.start / en.hop), i1 = Math.min(en.db.length, Math.floor(clip.end / en.hop));
+    for (let i = i0; i + win <= i1; i += 2) {
+      let sum = 0, active = 0;
+      for (let k = i; k < i + win; k++) { sum += en.db[k]; if (en.db[k] > -35) active++; }
+      if (active / win < 0.6) continue;               // mayormente silencio: se descarta
+      cands.push({ clip, s0: i * en.hop, s1: (i + win) * en.hop, score: sum / win + 5 * (active / win) });
+    }
+  }
+  cands.sort((a, b) => b.score - a.score);
+  const picked = [];
+  for (const c of cands) {
+    if (picked.length >= n) break;
+    const clash = picked.some(p => p.clip.url === c.clip.url && c.s0 < p.s1 + 2 && c.s1 > p.s0 - 2);
+    if (!clash) picked.push(c);
+  }
+  return picked;
+}
+async function generateShorts() {
+  if (S.exporting || !S.clips.length) return;
+  const n = clamp(Math.round(+$('shN').value) || 5, 1, 20), D = +$('shD').value;
+  stop(); busy('Analizando el audio…');
+  let picks = [];
+  try { picks = await findHighlights(n, D); }
+  catch (err) { toast('No se pudo analizar el audio: ' + err.message); }
+  busy('');
+  if (!picks.length) return toast('No encontré tramos con voz o sonido suficiente.');
+
+  shortsList.forEach(s => URL.revokeObjectURL(s.url));
+  shortsList = []; renderShorts();
+  const saved = { clips: S.clips, texts: S.texts, sel: S.sel };
+  const cw = cv.width, ch = cv.height;
+  S.exporting = true; S.cover = true; [cv.width, cv.height] = [1080, 1920]; updateToolbar();
+  try {
+    for (let i = 0; i < picks.length; i++) {
+      const p = picks[i];
+      S.clips = [{ ...p.clip, id: -1, start: p.s0, end: p.s1 }]; S.texts = [];
+      $('shProg').textContent = `Grabando short ${i + 1} de ${picks.length}…`;
+      $('bar').hidden = false; $('barFill').style.width = '0';
+      const rec = await recordTimeline(q => { $('barFill').style.width = Math.min(100, q * 100) + '%'; });
+      $('bar').hidden = true;
+      if (!rec) break;
+      shortsList.push({ blob: rec.blob, ext: rec.ext, url: URL.createObjectURL(rec.blob), label: `Short ${i + 1} · desde ${fmt(p.s0)} · ${D} s` });
+      renderShorts();
+    }
+  } finally {
+    S.clips = saved.clips; S.texts = saved.texts; S.sel = saved.sel;
+    S.exporting = false; S.cover = false; [cv.width, cv.height] = [cw, ch];
+    $('shProg').textContent = shortsList.length ? `Listo: ${shortsList.length} short(s). Guárdalos uno a uno.` : '';
+    setPlayhead(0); renderAll(); scrubTo(0);
+  }
+}
+function renderShorts() {
+  const box = $('shList'); box.innerHTML = '';
+  shortsList.forEach((s, i) => {
+    const d = document.createElement('div'); d.className = 'short';
+    d.innerHTML = `<video src="${s.url}" controls playsinline></video>
+      <div class="row"><span class="grow mut">${esc(s.label)}</span><button data-save="${i}">Guardar</button></div>`;
+    box.appendChild(d);
+  });
+  box.querySelectorAll('[data-save]').forEach(b => b.onclick = async () => {
+    const i = +b.dataset.save, s = shortsList[i];
+    b.disabled = true;
+    const msg = await saveBlob(s.blob, `short-${i + 1}.${s.ext}`);
+    b.disabled = false; toast(msg);
+  });
+}
+$('shGo').onclick = generateShorts;
 
 $('aspect').onchange = e => { S.aspect = e.target.value; applyAspect(); };
 $('playBtn').onclick = togglePlay;
@@ -754,6 +865,7 @@ function updateToolbar() {
   $('playBtn').disabled = !has || busyNow;
   $('exportBtn').disabled = !has || busyNow;
   $('autoAll').disabled = !has || busyNow;
+  $('shGo').disabled = !has || busyNow;
   $('undoBtn').disabled = !hist.undo.length || busyNow;
   $('redoBtn').disabled = !hist.redo.length || busyNow;
   $('empty').hidden = has;
