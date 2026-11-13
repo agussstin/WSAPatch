@@ -40,6 +40,7 @@
   <div class="keys">
     <kbd>W A S D</kbd> moverse · <kbd>Espacio</kbd> saltar · <kbd>Shift</kbd> correr · <kbd>F</kbd> volar (Espacio/C subir y bajar)<br>
     <kbd>Click izq.</kbd> romper · <kbd>Click der.</kbd> poner · <kbd>1-0</kbd> / rueda elegir bloque<br>
+    <kbd>Flechas</kbd> o arrastrar el mouse también sirven para mirar<br>
     <kbd>G</kbd> guardar · <kbd>R</kbd> mundo nuevo · <kbd>Esc</kbd> pausa
   </div>
 </div>
@@ -367,6 +368,8 @@ function moveAxis(axis, d) {
 
 const keys = {};
 function update(dt) {
+  const ls = 2.2 * dt / 0.0025;
+  look(((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) * ls, ((keys.ArrowDown ? 1 : 0) - (keys.ArrowUp ? 1 : 0)) * ls);
   const sp = (keys.ShiftLeft || keys.ShiftRight ? 7.5 : 4.5) * (player.fly ? 2 : 1);
   const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw);
   const rx = Math.cos(player.yaw), rz = -Math.sin(player.yaw);
@@ -417,19 +420,50 @@ function raycast(maxD = 7) {
 
 // ---------------------------------------------------------------- Entrada
 const menu = document.getElementById("menu");
-let locked = false;
-menu.addEventListener("click", () => canvas.requestPointerLock());
+// locked = se está jugando. pointer = el mouse está capturado (si el navegador lo permite).
+// Sin captura: se mira arrastrando el mouse o con las flechas, y un click sin arrastrar rompe/pone.
+let locked = false, pointer = false;
+function startGame() {
+  locked = true; menu.style.display = "none";
+  try {
+    const p = canvas.requestPointerLock();
+    if (p && p.catch) p.catch(() => toast("Mirá arrastrando el mouse o con las flechas"));
+  } catch (err) { toast("Mirá arrastrando el mouse o con las flechas"); }
+}
+function pauseGame() { locked = false; menu.style.display = "flex"; for (const k in keys) keys[k] = false; }
+menu.addEventListener("click", startGame);
 document.addEventListener("pointerlockchange", () => {
-  locked = document.pointerLockElement === canvas;
-  menu.style.display = locked ? "none" : "flex";
+  const was = pointer;
+  pointer = document.pointerLockElement === canvas;
+  if (was && !pointer) pauseGame();
 });
+document.addEventListener("pointerlockerror", () => toast("Mirá arrastrando el mouse o con las flechas"));
+function look(dx, dy) {
+  player.yaw -= dx * 0.0025;
+  player.pitch = Math.max(-1.55, Math.min(1.55, player.pitch - dy * 0.0025));
+}
+let drag = null;
 document.addEventListener("mousemove", e => {
   if (!locked) return;
-  player.yaw -= e.movementX * 0.0025;
-  player.pitch = Math.max(-1.55, Math.min(1.55, player.pitch - e.movementY * 0.0025));
+  if (pointer) look(e.movementX, e.movementY);
+  else if (drag) {
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.moved += Math.abs(dx) + Math.abs(dy);
+    drag.x = e.clientX; drag.y = e.clientY;
+    look(dx * 1.6, dy * 1.6);
+  }
 });
 canvas.addEventListener("mousedown", e => {
   if (!locked) return;
+  if (pointer) act(e.button);
+  else drag = { x: e.clientX, y: e.clientY, moved: 0, button: e.button };
+});
+document.addEventListener("mouseup", () => {
+  if (drag && drag.moved < 6) act(drag.button);
+  drag = null;
+});
+function act(button) {
+  const e = { button };
   const r = raycast();
   if (!r) return;
   if (e.button === 0) {
@@ -440,12 +474,13 @@ canvas.addEventListener("mousedown", e => {
     if (collides(player.x, player.y, player.z)) setB(x, y, z, AIR);
     else markDirty(x, z);
   }
-});
+}
 document.addEventListener("contextmenu", e => e.preventDefault());
 document.addEventListener("wheel", e => { if (locked) selectSlot((selected + Math.sign(e.deltaY) + HOTBAR.length) % HOTBAR.length); });
 document.addEventListener("keydown", e => {
   keys[e.code] = true;
-  if (e.code === "Space") e.preventDefault();
+  if (e.code === "Space" || e.code.startsWith("Arrow")) e.preventDefault();
+  if ((e.code === "Escape" || e.code === "KeyP") && locked && !pointer) { pauseGame(); return; }
   const m = e.code.match(/^Digit(\d)$/);
   if (m) selectSlot((+m[1] + 9) % 10);
   if (e.code === "KeyF") { player.fly = !player.fly; player.vy = 0; toast(player.fly ? "Modo vuelo activado" : "Modo vuelo desactivado"); }
