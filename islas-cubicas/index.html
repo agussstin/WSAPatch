@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Islas Cúbicas</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: system-ui, sans-serif; }
+  canvas#gl { width: 100%; height: 100%; display: block; }
+  #cross { position: fixed; left: 50%; top: 50%; width: 20px; height: 20px; margin: -10px 0 0 -10px; pointer-events: none; }
+  #cross::before, #cross::after { content: ""; position: absolute; background: rgba(255,255,255,.85); mix-blend-mode: difference; }
+  #cross::before { left: 9px; top: 0; width: 2px; height: 20px; }
+  #cross::after { top: 9px; left: 0; height: 2px; width: 20px; }
+  #hotbar { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; gap: 4px;
+            padding: 4px; background: rgba(20,24,40,.55); border-radius: 10px; }
+  .slot { width: 44px; height: 44px; border: 2px solid rgba(255,255,255,.15); border-radius: 6px; position: relative; }
+  .slot canvas { width: 32px; height: 32px; margin: 6px; image-rendering: pixelated; }
+  .slot.sel { border-color: #ffe27a; box-shadow: 0 0 8px #ffe27a; }
+  .slot span { position: absolute; top: 1px; left: 4px; font-size: 10px; color: #fff; text-shadow: 0 1px 2px #000; }
+  #info { position: fixed; top: 10px; left: 12px; color: #fff; font-size: 13px; text-shadow: 0 1px 3px #000; line-height: 1.5; }
+  #blockname { position: fixed; bottom: 72px; left: 50%; transform: translateX(-50%); color: #fff;
+               text-shadow: 0 1px 3px #000; font-size: 15px; transition: opacity .4s; }
+  #menu { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+          background: radial-gradient(circle, rgba(30,40,80,.55), rgba(10,10,30,.85)); color: #fff; cursor: pointer; text-align: center; }
+  #menu h1 { font-size: 54px; margin: 0 0 6px; letter-spacing: 2px; color: #ffe27a; text-shadow: 0 4px 0 #b0569a; }
+  #menu p { margin: 4px; opacity: .9; }
+  #menu .keys { margin-top: 18px; font-size: 14px; line-height: 1.8; opacity: .85; }
+  kbd { background: rgba(255,255,255,.15); padding: 1px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="cross"></div>
+<div id="info"></div>
+<div id="blockname"></div>
+<div id="hotbar"></div>
+<div id="menu">
+  <h1>Islas Cúbicas</h1>
+  <p>Construí sobre islas que flotan en el cielo. ¡No te caigas al vacío!</p>
+  <p><b>Hacé click para jugar</b></p>
+  <div class="keys">
+    <kbd>W A S D</kbd> moverse · <kbd>Espacio</kbd> saltar · <kbd>Shift</kbd> correr · <kbd>F</kbd> volar (Espacio/C subir y bajar)<br>
+    <kbd>Click izq.</kbd> romper · <kbd>Click der.</kbd> poner · <kbd>1-0</kbd> / rueda elegir bloque<br>
+    <kbd>G</kbd> guardar · <kbd>R</kbd> mundo nuevo · <kbd>Esc</kbd> pausa
+  </div>
+</div>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------- Bloques
+const AIR = 0;
+const BLOCKS = [
+  null,
+  { name: "Musgo",      tex: [0, 1, 2] },   // arriba, lados, abajo
+  { name: "Tierra",     tex: [2, 2, 2] },
+  { name: "Piedra",     tex: [3, 3, 3] },
+  { name: "Arena",      tex: [4, 4, 4] },
+  { name: "Tronco",     tex: [6, 5, 6] },
+  { name: "Coral",      tex: [7, 7, 7], cutout: true },
+  { name: "Cristal",    tex: [8, 8, 8], glow: 1.2 },
+  { name: "Terracota",  tex: [9, 9, 9] },
+  { name: "Tablas",     tex: [10, 10, 10] },
+  { name: "Farol",      tex: [11, 11, 11], glow: 1.45 },
+];
+const HOTBAR = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+// ---------------------------------------------------------------- Aleatorio y ruido
+let seed = Math.floor(Math.random() * 1e9);
+function hash(x, y, s) {
+  let h = (x * 374761393 + y * 668265263 + s * 2147483647) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function noise2(x, y, s) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash(xi, yi, s), b = hash(xi + 1, yi, s), c = hash(xi, yi + 1, s), d = hash(xi + 1, yi + 1, s);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, y, s, oct = 4) {
+  let t = 0, amp = 1, norm = 0;
+  for (let i = 0; i < oct; i++) { t += noise2(x, y, s + i * 31) * amp; norm += amp; amp *= 0.5; x *= 2; y *= 2; }
+  return t / norm;
+}
+
+// ---------------------------------------------------------------- Mundo
+const W = 128, D = 128, H = 64, CS = 16;
+let world = new Uint8Array(W * D * H);
+const idx = (x, y, z) => (y * D + z) * W + x;
+function getB(x, y, z) {
+  if (x < 0 || z < 0 || y < 0 || x >= W || z >= D || y >= H) return AIR;
+  return world[idx(x, y, z)];
+}
+function setB(x, y, z, b) {
+  if (x < 0 || z < 0 || y < 0 || x >= W || z >= D || y >= H) return;
+  world[idx(x, y, z)] = b;
+}
+
+function generate() {
+  world.fill(0);
+  const rnd = (x, z, k) => hash(x * 7 + k, z * 13 - k, seed + 99);
+  for (let x = 0; x < W; x++) for (let z = 0; z < D; z++) {
+    // máscara de islas: ruido grande + caída hacia los bordes del mundo
+    const dx = (x - W / 2) / (W / 2), dz = (z - D / 2) / (D / 2);
+    const edge = Math.max(0, Math.hypot(dx, dz) - 0.55) * 1.6;
+    const n = fbm(x / 34, z / 34, seed) - edge;
+    const s = (n - 0.47) / 0.4;
+    if (s <= 0) continue;
+    const top = Math.floor(28 + s * 9 + fbm(x / 12, z / 12, seed + 5) * 6);
+    const depth = Math.floor(2 + s * 22 + fbm(x / 6, z / 6, seed + 9) * 6);
+    for (let y = Math.max(1, top - depth); y <= top; y++) {
+      let b = 3;
+      if (y === top) b = s < 0.1 ? 4 : 1;
+      else if (y > top - 4) b = s < 0.1 ? 4 : 2;
+      else if (hash(x * 31 + y, z * 17 - y, seed) < 0.025) b = 7;
+      setB(x, y, z, b);
+    }
+  }
+  // árboles de coral
+  for (let x = 3; x < W - 3; x++) for (let z = 3; z < D - 3; z++) {
+    if (rnd(x, z, 1) > 0.018) continue;
+    let y = H - 1; while (y > 0 && getB(x, y, z) === AIR) y--;
+    if (getB(x, y, z) !== 1) continue;
+    const h = 4 + Math.floor(rnd(x, z, 2) * 3);
+    for (let i = 1; i <= h; i++) setB(x, y + i, z, 5);
+    const cy = y + h, r = 2 + (rnd(x, z, 3) > 0.6 ? 1 : 0);
+    for (let ox = -r; ox <= r; ox++) for (let oy = -1; oy <= r; oy++) for (let oz = -r; oz <= r; oz++) {
+      if (ox * ox + oy * oy * 1.6 + oz * oz > r * r + 1) continue;
+      if (getB(x + ox, cy + oy, z + oz) === AIR) setB(x + ox, cy + oy, z + oz, 6);
+    }
+  }
+  // algunos faroles sueltos sobre el musgo
+  for (let i = 0; i < 40; i++) {
+    const x = Math.floor(hash(i, 3, seed) * W), z = Math.floor(hash(i, 7, seed) * D);
+    let y = H - 1; while (y > 0 && getB(x, y, z) === AIR) y--;
+    if (getB(x, y, z) === 1) setB(x, y + 1, z, 10);
+  }
+}
+
+// ---------------------------------------------------------------- Texturas (atlas procedural)
+const TILE = 16, ATLAS_COLS = 8, ATLAS_ROWS = 2;
+const atlas = document.createElement("canvas");
+atlas.width = TILE * ATLAS_COLS; atlas.height = TILE * ATLAS_ROWS;
+function makeAtlas() {
+  const g = atlas.getContext("2d");
+  const r = (i, j, k) => hash(i * 17 + k * 101, j * 29 + k, 4242);
+  const px = (t, i, j, col) => { g.fillStyle = col; g.fillRect((t % ATLAS_COLS) * TILE + i, Math.floor(t / ATLAS_COLS) * TILE + j, 1, 1); };
+  const shade = (c, f) => `rgb(${c.map(v => Math.max(0, Math.min(255, v * f | 0))).join(",")})`;
+  const noisy = (t, base, amt) => { for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) px(t, i, j, shade(base, 1 - amt + r(i, j, t) * amt * 2)); };
+  noisy(0, [63, 181, 138], 0.18);                                        // musgo arriba
+  noisy(1, [122, 82, 54], 0.15);                                         // musgo lado
+  for (let i = 0; i < 16; i++) { const d = 3 + Math.floor(r(i, 0, 50) * 3); for (let j = 0; j < d; j++) px(1, i, j, shade([63, 181, 138], 0.85 + r(i, j, 51) * 0.3)); }
+  noisy(2, [122, 82, 54], 0.18);                                         // tierra
+  noisy(3, [125, 133, 149], 0.14);                                       // piedra
+  for (let k = 0; k < 6; k++) { const i = Math.floor(r(k, 1, 52) * 14), j = Math.floor(r(k, 2, 52) * 14); px(3, i, j, "#5c6373"); px(3, i + 1, j, "#5c6373"); }
+  noisy(4, [230, 210, 154], 0.08);                                       // arena
+  for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) px(5, i, j, shade([91, 59, 42], (i % 4 === 0 ? 0.75 : 1) * (0.9 + r(i, j, 5) * 0.2)));
+  for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) { const d = Math.hypot(i - 7.5, j - 7.5); px(6, i, j, shade([176, 128, 86], (Math.floor(d) % 3 === 0 ? 0.75 : 1) * (d > 7 ? 0.6 : 1))); }
+  for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) {             // coral (con huecos)
+    if (r(i, j, 7) < 0.22) continue;
+    px(7, i, j, shade([214, 95, 168], 0.75 + r(i, j, 71) * 0.45));
+  }
+  for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) {             // cristal
+    const e = i === 0 || j === 0 || i === 15 || j === 15;
+    const shine = (i + j === 6 || i + j === 7) && i < 8;
+    px(8, i, j, e ? "#2aa7c9" : shine ? "#e9fdff" : shade([94, 232, 255], 0.85 + r(i, j, 8) * 0.2));
+  }
+  for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) {             // terracota en ladrillos
+    const row = Math.floor(j / 4), off = row % 2 ? 4 : 0;
+    const mortar = j % 4 === 3 || (i + off) % 8 === 7;
+    px(9, i, j, mortar ? "#e8d6c0" : shade([196, 98, 66], 0.9 + r(i, j, 9) * 0.2));
+  }
+  for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) {             // tablas
+    const line = j % 5 === 4;
+    px(10, i, j, line ? "#7a4f22" : shade([214, 160, 92], 0.88 + r(i, j >> 2, 10) * 0.24));
+  }
+  for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) {             // farol
+    const frame = i < 2 || j < 2 || i > 13 || j > 13;
+    const d = Math.hypot(i - 7.5, j - 7.5);
+    px(11, i, j, frame ? "#4a3a2a" : shade([255, 226, 122], 1.15 - d * 0.05));
+  }
+}
+function tileUV(t) { return [(t % ATLAS_COLS) / ATLAS_COLS, Math.floor(t / ATLAS_COLS) / ATLAS_ROWS]; }
+
+// ---------------------------------------------------------------- WebGL
+const canvas = document.getElementById("gl");
+const gl = canvas.getContext("webgl", { antialias: false });
+if (!gl) document.body.innerHTML = "<h2 style='color:#fff;padding:20px'>Tu navegador no soporta WebGL :(</h2>";
+
+function program(vs, fs) {
+  const mk = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s); return s; };
+  const p = gl.createProgram();
+  gl.attachShader(p, mk(gl.VERTEX_SHADER, vs)); gl.attachShader(p, mk(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw gl.getProgramInfoLog(p);
+  return p;
+}
+const blockProg = program(`
+  attribute vec3 aPos; attribute vec2 aUV; attribute float aShade;
+  uniform mat4 uMVP; uniform vec3 uCam;
+  varying vec2 vUV; varying float vShade; varying float vDist; varying float vY;
+  void main() { vUV = aUV; vShade = aShade; vDist = distance(aPos, uCam); vY = aPos.y;
+    gl_Position = uMVP * vec4(aPos, 1.0); }`, `
+  precision mediump float;
+  uniform sampler2D uTex; uniform vec3 uFog;
+  varying vec2 vUV; varying float vShade; varying float vDist; varying float vY;
+  void main() {
+    vec4 c = texture2D(uTex, vUV);
+    if (c.a < 0.5) discard;
+    vec3 col = c.rgb * vShade;
+    float f = smoothstep(45.0, 95.0, vDist);
+    col = mix(col, uFog, f);
+    gl_FragColor = vec4(col, 1.0);
+  }`);
+const lineProg = program(`
+  attribute vec3 aPos; uniform mat4 uMVP;
+  void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`, `
+  precision mediump float; void main() { gl_FragColor = vec4(0.05, 0.05, 0.1, 1.0); }`);
+
+const L = {
+  pos: gl.getAttribLocation(blockProg, "aPos"), uv: gl.getAttribLocation(blockProg, "aUV"),
+  shade: gl.getAttribLocation(blockProg, "aShade"), mvp: gl.getUniformLocation(blockProg, "uMVP"),
+  cam: gl.getUniformLocation(blockProg, "uCam"), fog: gl.getUniformLocation(blockProg, "uFog"),
+  tex: gl.getUniformLocation(blockProg, "uTex"),
+  lpos: gl.getAttribLocation(lineProg, "aPos"), lmvp: gl.getUniformLocation(lineProg, "uMVP"),
+};
+
+let texture;
+function uploadAtlas() {
+  texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlas);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+
+// ---------------------------------------------------------------- Mallas por chunk
+const FACES = [
+  { n: [1, 0, 0],  c: [[1,0,1],[1,1,1],[1,1,0],[1,0,0]], s: 0.8,  t: 1 },
+  { n: [-1, 0, 0], c: [[0,0,0],[0,1,0],[0,1,1],[0,0,1]], s: 0.8,  t: 1 },
+  { n: [0, 1, 0],  c: [[0,1,1],[0,1,0],[1,1,0],[1,1,1]], s: 1.0,  t: 0 },
+  { n: [0, -1, 0], c: [[0,0,0],[0,0,1],[1,0,1],[1,0,0]], s: 0.55, t: 2 },
+  { n: [0, 0, 1],  c: [[0,0,1],[0,1,1],[1,1,1],[1,0,1]], s: 0.9,  t: 1 },
+  { n: [0, 0, -1], c: [[1,0,0],[1,1,0],[0,1,0],[0,0,0]], s: 0.9,  t: 1 },
+];
+const CORNER_UV = [[0, 1], [0, 0], [1, 0], [1, 1]];
+const chunks = [];  // {buf, count, dirty}
+const CX = W / CS, CZ = D / CS;
+for (let i = 0; i < CX * CZ; i++) chunks.push({ buf: null, count: 0, dirty: true });
+
+const isOpaque = b => b !== AIR && !BLOCKS[b].cutout;
+function vertexAO(x, y, z, f, corner) {
+  // oclusión ambiental simple: mira los 3 vecinos alrededor de la esquina
+  const n = f.n, c = f.c[corner];
+  const ax = n[0] !== 0 ? [0, 1, 2].filter(i => i !== 0) : n[1] !== 0 ? [0, 2] : [0, 1];
+  const o = [x + n[0], y + n[1], z + n[2]];
+  const d1 = [0, 0, 0], d2 = [0, 0, 0];
+  d1[ax[0]] = c[ax[0]] ? 1 : -1; d2[ax[1]] = c[ax[1]] ? 1 : -1;
+  const s1 = isOpaque(getB(o[0] + d1[0], o[1] + d1[1], o[2] + d1[2])) ? 1 : 0;
+  const s2 = isOpaque(getB(o[0] + d2[0], o[1] + d2[1], o[2] + d2[2])) ? 1 : 0;
+  const cc = isOpaque(getB(o[0] + d1[0] + d2[0], o[1] + d1[1] + d2[1], o[2] + d1[2] + d2[2])) ? 1 : 0;
+  const ao = s1 && s2 ? 3 : s1 + s2 + cc;
+  return 1 - ao * 0.17;
+}
+function buildChunk(ci) {
+  const cx = (ci % CX) * CS, cz = Math.floor(ci / CX) * CS;
+  const v = [];
+  const eps = 0.001;
+  for (let y = 0; y < H; y++) for (let z = cz; z < cz + CS; z++) for (let x = cx; x < cx + CS; x++) {
+    const b = getB(x, y, z);
+    if (b === AIR) continue;
+    const def = BLOCKS[b];
+    for (const f of FACES) {
+      const nb = getB(x + f.n[0], y + f.n[1], z + f.n[2]);
+      if (isOpaque(nb) || (nb === b && def.cutout)) continue;
+      const [u0, v0] = tileUV(def.tex[f.t]);
+      const quad = [];
+      for (let k = 0; k < 4; k++) {
+        const c = f.c[k];
+        const uv = CORNER_UV[k];
+        const ao = def.glow ? 1 : vertexAO(x, y, z, f, k);
+        quad.push([x + c[0], y + c[1], z + c[2],
+          u0 + (eps + uv[0] * (1 - 2 * eps)) / ATLAS_COLS, v0 + (eps + uv[1] * (1 - 2 * eps)) / ATLAS_ROWS,
+          (def.glow || f.s) * ao]);
+      }
+      for (const k of [0, 1, 2, 0, 2, 3]) v.push(...quad[k]);
+    }
+  }
+  const ch = chunks[ci];
+  if (!ch.buf) ch.buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, ch.buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
+  ch.count = v.length / 6;
+  ch.dirty = false;
+}
+function markDirty(x, z) {
+  for (const [ox, oz] of [[0,0],[1,0],[-1,0],[0,1],[0,-1]]) {
+    const xx = x + ox, zz = z + oz;
+    if (xx < 0 || zz < 0 || xx >= W || zz >= D) continue;
+    chunks[Math.floor(zz / CS) * CX + Math.floor(xx / CS)].dirty = true;
+  }
+}
+
+// ---------------------------------------------------------------- Matrices
+function perspective(fov, asp, near, far) {
+  const f = 1 / Math.tan(fov / 2), o = new Float32Array(16);
+  o[0] = f / asp; o[5] = f; o[10] = (far + near) / (near - far); o[11] = -1; o[14] = 2 * far * near / (near - far);
+  return o;
+}
+function lookDir(e, f) {
+  const up = [0, 1, 0];
+  let s = [f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2], f[0] * up[1] - f[1] * up[0]];
+  const sl = Math.hypot(...s); s = s.map(v => v / sl);
+  const u = [s[1] * f[2] - s[2] * f[1], s[2] * f[0] - s[0] * f[2], s[0] * f[1] - s[1] * f[0]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  return new Float32Array([s[0], u[0], -f[0], 0, s[1], u[1], -f[1], 0, s[2], u[2], -f[2], 0, -dot(s, e), -dot(u, e), dot(f, e), 1]);
+}
+function mul(a, b) {
+  const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+    let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = s;
+  }
+  return o;
+}
+
+// ---------------------------------------------------------------- Jugador
+const player = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, yaw: 0, pitch: 0, onGround: false, fly: false };
+const HALF = 0.3, HEIGHT = 1.8, EYE = 1.62;
+let selected = 0;
+
+function spawn() {
+  let best = null;
+  for (let r = 0; r < W / 2 && !best; r++) for (let a = 0; a < 32 && !best; a++) {
+    const x = Math.floor(W / 2 + Math.cos(a / 32 * Math.PI * 2) * r), z = Math.floor(D / 2 + Math.sin(a / 32 * Math.PI * 2) * r);
+    for (let y = H - 1; y > 0; y--) {
+      const b = getB(x, y, z);
+      if (b === 1 || b === 4) { best = [x, y, z]; break; }
+      if (b !== AIR) break;
+    }
+  }
+  if (!best) best = [W / 2, 30, D / 2];
+  Object.assign(player, { x: best[0] + 0.5, y: best[1] + 1.01, z: best[2] + 0.5, vx: 0, vy: 0, vz: 0 });
+}
+
+function collides(x, y, z) {
+  for (let bx = Math.floor(x - HALF); bx <= Math.floor(x + HALF); bx++)
+    for (let by = Math.floor(y); by <= Math.floor(y + HEIGHT); by++)
+      for (let bz = Math.floor(z - HALF); bz <= Math.floor(z + HALF); bz++)
+        if (getB(bx, by, bz) !== AIR) return true;
+  return false;
+}
+function moveAxis(axis, d) {
+  if (d === 0) return;
+  const steps = Math.ceil(Math.abs(d) / 0.2), sd = d / steps;
+  for (let i = 0; i < steps; i++) {
+    const p = { x: player.x, y: player.y, z: player.z };
+    p[axis] += sd;
+    if (collides(p.x, p.y, p.z)) {
+      if (axis === "y") { if (sd < 0) player.onGround = true; player.vy = 0; }
+      else player["v" + axis] = 0;
+      return;
+    }
+    player[axis] = p[axis];
+  }
+}
+
+const keys = {};
+function update(dt) {
+  const sp = (keys.ShiftLeft || keys.ShiftRight ? 7.5 : 4.5) * (player.fly ? 2 : 1);
+  const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw);
+  const rx = Math.cos(player.yaw), rz = -Math.sin(player.yaw);
+  let mx = 0, mz = 0;
+  if (keys.KeyW) { mx += fx; mz += fz; } if (keys.KeyS) { mx -= fx; mz -= fz; }
+  if (keys.KeyD) { mx += rx; mz += rz; } if (keys.KeyA) { mx -= rx; mz -= rz; }
+  const ml = Math.hypot(mx, mz) || 1;
+  const accel = player.onGround || player.fly ? 14 : 4;
+  player.vx += (mx / ml * sp - player.vx) * Math.min(1, accel * dt);
+  player.vz += (mz / ml * sp - player.vz) * Math.min(1, accel * dt);
+
+  if (player.fly) {
+    const t = (keys.Space ? 1 : 0) - (keys.KeyC ? 1 : 0);
+    player.vy += (t * 8 - player.vy) * Math.min(1, 10 * dt);
+  } else {
+    player.vy -= 26 * dt;
+    if (player.vy < -40) player.vy = -40;
+    if (keys.Space && player.onGround) player.vy = 8.6;
+  }
+  player.onGround = false;
+  moveAxis("x", player.vx * dt);
+  moveAxis("z", player.vz * dt);
+  moveAxis("y", player.vy * dt);
+
+  if (player.y < -30) { spawn(); toast("¡Caíste al vacío!"); }
+}
+
+// ---------------------------------------------------------------- Raycast (DDA)
+function forward() {
+  const cp = Math.cos(player.pitch);
+  return [-Math.sin(player.yaw) * cp, Math.sin(player.pitch), -Math.cos(player.yaw) * cp];
+}
+function raycast(maxD = 7) {
+  const o = [player.x, player.y + EYE, player.z], d = forward();
+  let p = o.map(Math.floor), prev = null;
+  const step = d.map(Math.sign);
+  const tD = d.map(v => Math.abs(1 / v));
+  const tM = d.map((v, i) => v > 0 ? (p[i] + 1 - o[i]) / v : v < 0 ? (o[i] - p[i]) / -v : Infinity);
+  let t = 0;
+  while (t <= maxD) {
+    if (getB(p[0], p[1], p[2]) !== AIR) return { hit: p, prev };
+    prev = p.slice();
+    const a = tM[0] < tM[1] ? (tM[0] < tM[2] ? 0 : 2) : (tM[1] < tM[2] ? 1 : 2);
+    t = tM[a]; tM[a] += tD[a]; p[a] += step[a];
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- Entrada
+const menu = document.getElementById("menu");
+let locked = false;
+menu.addEventListener("click", () => canvas.requestPointerLock());
+document.addEventListener("pointerlockchange", () => {
+  locked = document.pointerLockElement === canvas;
+  menu.style.display = locked ? "none" : "flex";
+});
+document.addEventListener("mousemove", e => {
+  if (!locked) return;
+  player.yaw -= e.movementX * 0.0025;
+  player.pitch = Math.max(-1.55, Math.min(1.55, player.pitch - e.movementY * 0.0025));
+});
+canvas.addEventListener("mousedown", e => {
+  if (!locked) return;
+  const r = raycast();
+  if (!r) return;
+  if (e.button === 0) {
+    setB(...r.hit, AIR); markDirty(r.hit[0], r.hit[2]);
+  } else if (e.button === 2 && r.prev) {
+    const [x, y, z] = r.prev;
+    setB(x, y, z, HOTBAR[selected]);
+    if (collides(player.x, player.y, player.z)) setB(x, y, z, AIR);
+    else markDirty(x, z);
+  }
+});
+document.addEventListener("contextmenu", e => e.preventDefault());
+document.addEventListener("wheel", e => { if (locked) selectSlot((selected + Math.sign(e.deltaY) + HOTBAR.length) % HOTBAR.length); });
+document.addEventListener("keydown", e => {
+  keys[e.code] = true;
+  if (e.code === "Space") e.preventDefault();
+  const m = e.code.match(/^Digit(\d)$/);
+  if (m) selectSlot((+m[1] + 9) % 10);
+  if (e.code === "KeyF") { player.fly = !player.fly; player.vy = 0; toast(player.fly ? "Modo vuelo activado" : "Modo vuelo desactivado"); }
+  if (e.code === "KeyG") save();
+  if (e.code === "KeyR" && !e.repeat) { seed = Math.floor(Math.random() * 1e9); newWorld(); toast("¡Mundo nuevo!"); }
+});
+document.addEventListener("keyup", e => keys[e.code] = false);
+window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
+
+// ---------------------------------------------------------------- HUD
+const hotbarEl = document.getElementById("hotbar"), nameEl = document.getElementById("blockname"), infoEl = document.getElementById("info");
+let toastTimer;
+function toast(msg) { nameEl.textContent = msg; nameEl.style.opacity = 1; clearTimeout(toastTimer); toastTimer = setTimeout(() => nameEl.style.opacity = 0, 1400); }
+function buildHotbar() {
+  hotbarEl.innerHTML = "";
+  HOTBAR.forEach((b, i) => {
+    const s = document.createElement("div"); s.className = "slot";
+    const c = document.createElement("canvas"); c.width = c.height = 16;
+    const t = BLOCKS[b].tex[1];
+    c.getContext("2d").drawImage(atlas, (t % ATLAS_COLS) * TILE, Math.floor(t / ATLAS_COLS) * TILE, 16, 16, 0, 0, 16, 16);
+    const n = document.createElement("span"); n.textContent = (i + 1) % 10;
+    s.append(c, n); hotbarEl.append(s);
+  });
+}
+function selectSlot(i) {
+  selected = i;
+  [...hotbarEl.children].forEach((s, j) => s.classList.toggle("sel", j === i));
+  toast(BLOCKS[HOTBAR[i]].name);
+}
+
+// ---------------------------------------------------------------- Guardado
+function save() {
+  try {
+    let bin = ""; const chunk = 0x8000;
+    for (let i = 0; i < world.length; i += chunk) bin += String.fromCharCode.apply(null, world.subarray(i, i + chunk));
+    localStorage.setItem("islas-cubicas", JSON.stringify({ seed, p: [player.x, player.y, player.z, player.yaw, player.pitch], w: btoa(bin) }));
+    toast("Mundo guardado");
+  } catch (err) { toast("No se pudo guardar"); }
+}
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem("islas-cubicas"));
+    if (!s) return false;
+    const bin = atob(s.w);
+    if (bin.length !== world.length) return false;
+    for (let i = 0; i < bin.length; i++) world[i] = bin.charCodeAt(i);
+    seed = s.seed;
+    [player.x, player.y, player.z, player.yaw, player.pitch] = s.p;
+    return true;
+  } catch (err) { return false; }
+}
+
+// ---------------------------------------------------------------- Bucle principal
+const SKY = [0.56, 0.79, 0.94];
+const lineBuf = gl.createBuffer();
+function boxLines(x, y, z) {
+  const e = 0.003, a = [x - e, y - e, z - e], b = [x + 1 + e, y + 1 + e, z + 1 + e];
+  const P = (i, j, k) => [[a, b][i][0], [a, b][j][1], [a, b][k][2]];
+  const ed = [[0,0,0,1,0,0],[0,1,0,1,1,0],[0,0,1,1,0,1],[0,1,1,1,1,1],[0,0,0,0,1,0],[1,0,0,1,1,0],
+              [0,0,1,0,1,1],[1,0,1,1,1,1],[0,0,0,0,0,1],[1,0,0,1,0,1],[0,1,0,0,1,1],[1,1,0,1,1,1]];
+  const v = [];
+  for (const q of ed) v.push(...P(q[0], q[1], q[2]), ...P(q[3], q[4], q[5]));
+  return new Float32Array(v);
+}
+
+function render() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(...SKY, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+
+  // reconstruir como mucho 4 chunks por frame
+  let built = 0;
+  for (let i = 0; i < chunks.length && built < 4; i++) if (chunks[i].dirty) { buildChunk(i); built++; }
+
+  const eye = [player.x, player.y + EYE, player.z];
+  const mvp = mul(perspective(70 * Math.PI / 180, w / h, 0.05, 200), lookDir(eye, forward()));
+
+  gl.useProgram(blockProg);
+  gl.uniformMatrix4fv(L.mvp, false, mvp);
+  gl.uniform3fv(L.cam, eye);
+  gl.uniform3fv(L.fog, SKY);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texture); gl.uniform1i(L.tex, 0);
+  gl.enableVertexAttribArray(L.pos); gl.enableVertexAttribArray(L.uv); gl.enableVertexAttribArray(L.shade);
+  for (const ch of chunks) {
+    if (!ch.count) continue;
+    gl.bindBuffer(gl.ARRAY_BUFFER, ch.buf);
+    gl.vertexAttribPointer(L.pos, 3, gl.FLOAT, false, 24, 0);
+    gl.vertexAttribPointer(L.uv, 2, gl.FLOAT, false, 24, 12);
+    gl.vertexAttribPointer(L.shade, 1, gl.FLOAT, false, 24, 20);
+    gl.drawArrays(gl.TRIANGLES, 0, ch.count);
+  }
+  gl.disableVertexAttribArray(L.uv); gl.disableVertexAttribArray(L.shade);
+
+  const r = raycast();
+  if (r) {
+    gl.useProgram(lineProg);
+    gl.uniformMatrix4fv(L.lmvp, false, mvp);
+    gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, boxLines(...r.hit), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(L.lpos);
+    gl.vertexAttribPointer(L.lpos, 3, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.LINES, 0, 24);
+  }
+}
+
+let last = performance.now(), fps = 0, frames = 0, fpsT = 0;
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (locked) update(dt);
+  render();
+  frames++; fpsT += dt;
+  if (fpsT > 0.5) { fps = Math.round(frames / fpsT); frames = 0; fpsT = 0; }
+  infoEl.innerHTML = `Islas Cúbicas · ${fps} fps<br>x ${player.x.toFixed(1)} · y ${player.y.toFixed(1)} · z ${player.z.toFixed(1)}${player.fly ? "<br>✈ volando" : ""}`;
+  requestAnimationFrame(loop);
+}
+
+function newWorld() {
+  generate(); spawn();
+  for (const c of chunks) c.dirty = true;
+}
+
+makeAtlas();
+uploadAtlas();
+buildHotbar();
+if (load()) { for (const c of chunks) c.dirty = true; } else newWorld();
+selectSlot(0);
+nameEl.style.opacity = 0;
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
